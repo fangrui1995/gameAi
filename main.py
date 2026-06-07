@@ -1204,6 +1204,33 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     def do_copy_to_annotated() -> None:
         copy_images(paths.selected_frames.resolve(), (paths.annotated / "images").resolve())
 
+    def do_fill_empty_labels() -> None:
+        images = iter_images(paths.annotated / "images")
+        ensure_dir(paths.annotated / "labels")
+        created = 0
+        for image in images:
+            label = paths.annotated / "labels" / f"{image.stem}.txt"
+            if not label.exists():
+                label.write_text("", encoding="utf-8")
+                created += 1
+        log(f"已补全空标签：{created} 个。")
+
+    def check_label_pairs() -> None:
+        images = iter_images(paths.annotated / "images")
+        labels_dir = paths.annotated / "labels"
+        missing = [image.name for image in images if not (labels_dir / f"{image.stem}.txt").exists()]
+        extra = []
+        if labels_dir.exists():
+            image_stems = {image.stem for image in images}
+            extra = [label.name for label in labels_dir.glob("*.txt") if label.stem not in image_stems]
+        if missing:
+            log(f"缺少标签：{len(missing)} 个。前 10 个：{', '.join(missing[:10])}")
+        if extra:
+            log(f"多余标签：{len(extra)} 个。前 10 个：{', '.join(extra[:10])}")
+        if not missing and not extra:
+            log("标签检查通过：图片和 txt 标签一一对应。")
+            messagebox.showinfo("标签检查通过", "图片和 txt 标签一一对应，可以构建数据集。")
+
     def do_install_labelimg() -> None:
         python_exe = project_python(paths)
         run_command([str(python_exe), "-m", "pip", "install", "labelImg"])
@@ -1259,10 +1286,31 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     body = ttk.PanedWindow(main_frame, orient="horizontal")
     body.pack(fill="both", expand=True)
 
-    left = ttk.Frame(body, padding=(0, 0, 12, 0))
+    left_container = ttk.Frame(body, padding=(0, 0, 12, 0))
     right = ttk.Frame(body)
-    body.add(left, weight=2)
+    body.add(left_container, weight=2)
     body.add(right, weight=3)
+
+    left_canvas = tk.Canvas(left_container, highlightthickness=0)
+    left_scrollbar = ttk.Scrollbar(left_container, orient="vertical", command=left_canvas.yview)
+    left = ttk.Frame(left_canvas)
+    left_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
+    left_canvas.configure(yscrollcommand=left_scrollbar.set)
+    left_canvas.pack(side="left", fill="both", expand=True)
+    left_scrollbar.pack(side="right", fill="y")
+
+    def update_left_scroll_region(_event=None) -> None:
+        left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+
+    def update_left_width(event) -> None:
+        left_canvas.itemconfigure(left_window, width=event.width)
+
+    def on_mousewheel(event) -> None:
+        left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    left.bind("<Configure>", update_left_scroll_region)
+    left_canvas.bind("<Configure>", update_left_width)
+    left_canvas.bind_all("<MouseWheel>", on_mousewheel)
 
     video_box = ttk.LabelFrame(left, text="1. 视频抽帧", style="Step.TLabelframe")
     video_box.pack(fill="x", pady=(0, 10))
@@ -1291,6 +1339,8 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     ttk.Button(annotate_box, text="安装/修复 LabelImg", command=lambda: run_background("安装/修复 LabelImg", do_install_labelimg)).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="启动 LabelImg", command=launch_labelimg).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="打开 LabelImg 错误日志", command=open_labelimg_log).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="补全空标签 txt", command=lambda: run_background("补全空标签", do_fill_empty_labels)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="检查图片和标签是否对应", command=check_label_pairs).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="打开标注图片目录 annotated/images", command=lambda: open_path(paths.annotated / "images")).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="打开标签目录 annotated/labels", command=lambda: open_path(paths.annotated / "labels")).pack(fill="x", padx=10, pady=(6, 10))
 
