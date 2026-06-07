@@ -1054,7 +1054,7 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     init_project(paths, [])
 
     root = tk.Tk()
-    root.title("Game AI - Stage 1 Visual Pipeline")
+    root.title("Game AI - 第一阶段可视化流程")
     root.geometry("980x700")
     root.minsize(900, 620)
 
@@ -1067,7 +1067,7 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     epochs_var = tk.StringVar(value="80")
     imgsz_var = tk.StringVar(value="640")
     batch_var = tk.StringVar(value="16")
-    status_var = tk.StringVar(value="Ready")
+    status_var = tk.StringVar(value="就绪")
     running = {"active": False}
 
     def log(message: str) -> None:
@@ -1083,31 +1083,31 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
         val_count = len(iter_images(paths.dataset / "images" / "val"))
         test_count = len(iter_images(paths.dataset / "images" / "test"))
         counts_var.set(
-            f"raw_frames: {raw_count}    selected: {selected_count}    "
-            f"annotated: {annotated_images} images / {annotated_labels} labels    "
-            f"dataset: train {train_count}, val {val_count}, test {test_count}"
+            f"原始帧: {raw_count}    已筛选: {selected_count}    "
+            f"已标注: {annotated_images} 张图 / {annotated_labels} 个标签    "
+            f"数据集: 训练 {train_count}, 验证 {val_count}, 测试 {test_count}"
         )
 
     def run_background(label: str, task) -> None:
         if running["active"]:
-            messagebox.showinfo("Task running", "A task is already running. Wait for it to finish.")
+            messagebox.showinfo("任务运行中", "已有任务正在执行，请等待完成。")
             return
 
         def worker() -> None:
             running["active"] = True
-            root.after(0, lambda: status_var.set(f"Running: {label}"))
-            root.after(0, lambda: log(f"START {label}"))
+            root.after(0, lambda: status_var.set(f"正在执行：{label}"))
+            root.after(0, lambda: log(f"开始：{label}"))
             try:
                 task()
             except Exception as exc:
-                root.after(0, lambda: log(f"ERROR {label}: {exc}"))
+                root.after(0, lambda: log(f"错误：{label}: {exc}"))
                 root.after(0, lambda: messagebox.showerror(label, str(exc)))
             else:
-                root.after(0, lambda: log(f"DONE {label}"))
+                root.after(0, lambda: log(f"完成：{label}"))
             finally:
                 running["active"] = False
                 root.after(0, refresh_counts)
-                root.after(0, lambda: status_var.set("Ready"))
+                root.after(0, lambda: status_var.set("就绪"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1115,8 +1115,8 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
         initial_dir = paths.raw_videos if paths.raw_videos.exists() else paths.root
         file_path = filedialog.askopenfilename(
             initialdir=str(initial_dir),
-            title="Select gameplay video",
-            filetypes=[("Video files", "*.mp4 *.mkv *.mov *.avi"), ("All files", "*.*")],
+            title="选择游戏录屏视频",
+            filetypes=[("视频文件", "*.mp4 *.mkv *.mov *.avi"), ("所有文件", "*.*")],
         )
         if file_path:
             video_var.set(file_path)
@@ -1128,17 +1128,17 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     def open_review() -> None:
         review_path = paths.reports / "frame_review.html"
         if not review_path.exists():
-            messagebox.showwarning("Missing review", "Generate the review page first.")
+            messagebox.showwarning("筛选页不存在", "请先生成图片筛选页。")
             return
         webbrowser.open(review_path.resolve().as_uri())
 
     def save_classes() -> None:
         classes = [item.strip() for item in classes_var.get().replace("\n", ",").split(",") if item.strip()]
         if not classes:
-            messagebox.showwarning("Classes required", "Enter at least one class name.")
+            messagebox.showwarning("缺少类别", "请至少输入一个类别名。")
             return
         (paths.root / "classes.txt").write_text("\n".join(classes) + "\n", encoding="utf-8")
-        log(f"Saved classes: {', '.join(classes)}")
+        log(f"已保存类别：{', '.join(classes)}")
 
     def do_extract() -> None:
         video = Path(video_var.get().strip())
@@ -1169,7 +1169,7 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
 
     header = ttk.Frame(main_frame)
     header.pack(fill="x", pady=(0, 12))
-    ttk.Label(header, text="Stage 1 Visual Pipeline", style="Title.TLabel").pack(side="left")
+    ttk.Label(header, text="第一阶段可视化流程", style="Title.TLabel").pack(side="left")
     ttk.Label(header, textvariable=status_var).pack(side="right")
 
     counts_var = tk.StringVar()
@@ -1183,34 +1183,34 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     body.add(left, weight=2)
     body.add(right, weight=3)
 
-    video_box = ttk.LabelFrame(left, text="1. Video -> Frames", style="Step.TLabelframe")
+    video_box = ttk.LabelFrame(left, text="1. 视频抽帧", style="Step.TLabelframe")
     video_box.pack(fill="x", pady=(0, 10))
     ttk.Entry(video_box, textvariable=video_var).pack(fill="x", padx=10, pady=(10, 6))
     row = ttk.Frame(video_box)
     row.pack(fill="x", padx=10, pady=(0, 10))
-    ttk.Button(row, text="Choose Video", command=pick_video).pack(side="left")
+    ttk.Button(row, text="选择视频", command=pick_video).pack(side="left")
     ttk.Label(row, text="FPS").pack(side="left", padx=(12, 4))
     ttk.Entry(row, width=6, textvariable=fps_var).pack(side="left")
-    ttk.Button(row, text="Extract Frames", command=lambda: run_background("Extract frames", do_extract)).pack(side="right")
+    ttk.Button(row, text="开始抽帧", command=lambda: run_background("抽帧", do_extract)).pack(side="right")
 
-    review_box = ttk.LabelFrame(left, text="2. Review And Select", style="Step.TLabelframe")
+    review_box = ttk.LabelFrame(left, text="2. 图片筛选", style="Step.TLabelframe")
     review_box.pack(fill="x", pady=(0, 10))
-    ttk.Button(review_box, text="Generate Review Page", command=lambda: run_background("Generate review page", do_review)).pack(fill="x", padx=10, pady=(10, 6))
-    ttk.Button(review_box, text="Open Review Page", command=open_review).pack(fill="x", padx=10, pady=6)
-    ttk.Button(review_box, text="Open raw_frames Folder", command=lambda: open_path(paths.raw_frames)).pack(fill="x", padx=10, pady=6)
-    ttk.Button(review_box, text="Open selected_frames Folder", command=lambda: open_path(paths.selected_frames)).pack(fill="x", padx=10, pady=6)
-    ttk.Button(review_box, text="Copy All Raw Frames To selected_frames", command=lambda: run_background("Select all raw frames", do_select_all)).pack(fill="x", padx=10, pady=(6, 10))
+    ttk.Button(review_box, text="生成筛选页面", command=lambda: run_background("生成筛选页面", do_review)).pack(fill="x", padx=10, pady=(10, 6))
+    ttk.Button(review_box, text="打开筛选页面", command=open_review).pack(fill="x", padx=10, pady=6)
+    ttk.Button(review_box, text="打开原始帧目录 raw_frames", command=lambda: open_path(paths.raw_frames)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(review_box, text="打开已筛选目录 selected_frames", command=lambda: open_path(paths.selected_frames)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(review_box, text="全部原始帧复制到 selected_frames", command=lambda: run_background("复制全部原始帧", do_select_all)).pack(fill="x", padx=10, pady=(6, 10))
 
-    annotate_box = ttk.LabelFrame(left, text="3. Annotation Prep", style="Step.TLabelframe")
+    annotate_box = ttk.LabelFrame(left, text="3. 标注准备", style="Step.TLabelframe")
     annotate_box.pack(fill="x", pady=(0, 10))
-    ttk.Label(annotate_box, text="Classes, comma separated").pack(anchor="w", padx=10, pady=(10, 2))
+    ttk.Label(annotate_box, text="类别名，多个类别用逗号分隔").pack(anchor="w", padx=10, pady=(10, 2))
     ttk.Entry(annotate_box, textvariable=classes_var).pack(fill="x", padx=10, pady=(0, 6))
-    ttk.Button(annotate_box, text="Save classes.txt", command=save_classes).pack(fill="x", padx=10, pady=6)
-    ttk.Button(annotate_box, text="Copy selected_frames To annotated/images", command=lambda: run_background("Copy to annotated/images", do_copy_to_annotated)).pack(fill="x", padx=10, pady=6)
-    ttk.Button(annotate_box, text="Open annotated/images", command=lambda: open_path(paths.annotated / "images")).pack(fill="x", padx=10, pady=6)
-    ttk.Button(annotate_box, text="Open annotated/labels", command=lambda: open_path(paths.annotated / "labels")).pack(fill="x", padx=10, pady=(6, 10))
+    ttk.Button(annotate_box, text="保存 classes.txt", command=save_classes).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="已筛选图片复制到 annotated/images", command=lambda: run_background("复制到 annotated/images", do_copy_to_annotated)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="打开标注图片目录 annotated/images", command=lambda: open_path(paths.annotated / "images")).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="打开标签目录 annotated/labels", command=lambda: open_path(paths.annotated / "labels")).pack(fill="x", padx=10, pady=(6, 10))
 
-    dataset_box = ttk.LabelFrame(left, text="4. Build Dataset And Train", style="Step.TLabelframe")
+    dataset_box = ttk.LabelFrame(left, text="4. 构建数据集与训练", style="Step.TLabelframe")
     dataset_box.pack(fill="x")
     ratio_row = ttk.Frame(dataset_box)
     ratio_row.pack(fill="x", padx=10, pady=(10, 6))
@@ -1218,13 +1218,13 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     ttk.Entry(ratio_row, width=6, textvariable=val_var).pack(side="left", padx=(4, 12))
     ttk.Label(ratio_row, text="Test").pack(side="left")
     ttk.Entry(ratio_row, width=6, textvariable=test_var).pack(side="left", padx=(4, 12))
-    ttk.Button(ratio_row, text="Build Dataset", command=lambda: run_background("Build dataset", do_build_dataset)).pack(side="right")
+    ttk.Button(ratio_row, text="构建数据集", command=lambda: run_background("构建数据集", do_build_dataset)).pack(side="right")
 
     train_row_1 = ttk.Frame(dataset_box)
     train_row_1.pack(fill="x", padx=10, pady=6)
-    ttk.Label(train_row_1, text="Model").pack(side="left")
+    ttk.Label(train_row_1, text="模型").pack(side="left")
     ttk.Entry(train_row_1, width=14, textvariable=model_var).pack(side="left", padx=(4, 12))
-    ttk.Label(train_row_1, text="Epochs").pack(side="left")
+    ttk.Label(train_row_1, text="轮数").pack(side="left")
     ttk.Entry(train_row_1, width=6, textvariable=epochs_var).pack(side="left", padx=(4, 12))
 
     train_row_2 = ttk.Frame(dataset_box)
@@ -1233,21 +1233,21 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     ttk.Entry(train_row_2, width=6, textvariable=imgsz_var).pack(side="left", padx=(4, 12))
     ttk.Label(train_row_2, text="batch").pack(side="left")
     ttk.Entry(train_row_2, width=6, textvariable=batch_var).pack(side="left", padx=(4, 12))
-    ttk.Button(train_row_2, text="Train YOLO", command=lambda: run_background("Train YOLO", do_train)).pack(side="right")
+    ttk.Button(train_row_2, text="训练 YOLO", command=lambda: run_background("训练 YOLO", do_train)).pack(side="right")
 
-    guide = ttk.LabelFrame(right, text="Workflow Notes", style="Step.TLabelframe")
+    guide = ttk.LabelFrame(right, text="流程说明", style="Step.TLabelframe")
     guide.pack(fill="x", pady=(0, 10))
     notes = (
-        "1. Choose the video in data/raw_videos, set FPS to 2 or 5, then Extract Frames.\n"
-        "2. Generate and open the review page. Copy useful frames into data/selected_frames.\n"
-        "3. Save class names. Copy selected frames into annotated/images.\n"
-        "4. Use LabelImg: Open Dir = annotated/images, Change Save Dir = annotated/labels, format = YOLO.\n"
-        "5. Build Dataset after every image has a matching .txt label.\n"
-        "6. Train only after dataset counts look correct."
+        "1. 选择 data/raw_videos 中的视频，FPS 建议 2 或 5，然后点击开始抽帧。\n"
+        "2. 生成并打开筛选页面，把有价值的图片复制到 data/selected_frames。\n"
+        "3. 保存类别名，然后把已筛选图片复制到 data/annotated/images。\n"
+        "4. 使用 LabelImg：Open Dir 选 annotated/images，Change Save Dir 选 annotated/labels，格式选 YOLO。\n"
+        "5. 每张图片都有同名 .txt 标签后，再构建数据集。\n"
+        "6. 确认数据集数量正确后，再开始训练。"
     )
     ttk.Label(guide, text=notes, justify="left").pack(fill="x", padx=10, pady=10)
 
-    log_frame = ttk.LabelFrame(right, text="Log", style="Step.TLabelframe")
+    log_frame = ttk.LabelFrame(right, text="日志", style="Step.TLabelframe")
     log_frame.pack(fill="both", expand=True)
     log_box = tk.Text(log_frame, height=20, wrap="word")
     scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=log_box.yview)
@@ -1257,13 +1257,13 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
 
     footer = ttk.Frame(main_frame)
     footer.pack(fill="x", pady=(10, 0))
-    ttk.Button(footer, text="Refresh Counts", command=refresh_counts).pack(side="left")
-    ttk.Button(footer, text="Open Project Folder", command=lambda: open_path(paths.root)).pack(side="left", padx=8)
-    ttk.Button(footer, text="Open README", command=lambda: os.startfile(str(paths.root / "README_STAGE1.md"))).pack(side="left")
-    ttk.Button(footer, text="Exit", command=root.destroy).pack(side="right")
+    ttk.Button(footer, text="刷新数量", command=refresh_counts).pack(side="left")
+    ttk.Button(footer, text="打开项目目录", command=lambda: open_path(paths.root)).pack(side="left", padx=8)
+    ttk.Button(footer, text="打开说明文档", command=lambda: os.startfile(str(paths.root / "README_STAGE1.md"))).pack(side="left")
+    ttk.Button(footer, text="退出", command=root.destroy).pack(side="right")
 
     refresh_counts()
-    log("GUI ready.")
+    log("界面已就绪。")
     root.mainloop()
 
 
