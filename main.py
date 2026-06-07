@@ -78,6 +78,14 @@ class ProjectPaths:
     def runtime_logs(self) -> Path:
         return self.root / "runtime_logs"
 
+    @property
+    def ui_templates(self) -> Path:
+        return self.root / "ui_templates"
+
+    @property
+    def failure_frames(self) -> Path:
+        return self.root / "runtime_logs" / "failure_frames"
+
 
 @dataclass(frozen=True)
 class Detection:
@@ -103,8 +111,23 @@ class RuntimeState:
     stable_hits: int = 0
     lost_hits: int = 0
     last_action_ts: float = 0.0
+    last_target_ts: float = 0.0
+    last_recovery_ts: float = 0.0
     action_count: int = 0
+    recovery_count: int = 0
     mode: str = "SEARCH"
+    game_state: str = "UNKNOWN"
+    ui_events: str = ""
+
+
+@dataclass(frozen=True)
+class UIEvent:
+    name: str
+    state: str
+    score: float
+    roi: tuple[int, int, int, int]
+    recovery_after: float
+    recovery: dict
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -285,6 +308,8 @@ def init_project(paths: ProjectPaths, classes: list[str]) -> None:
         paths.models,
         paths.reports,
         paths.runtime_logs,
+        paths.ui_templates,
+        paths.failure_frames,
     ]:
         ensure_dir(directory)
 
@@ -293,9 +318,77 @@ def init_project(paths: ProjectPaths, classes: list[str]) -> None:
         classes_path.write_text("\n".join(classes) + "\n", encoding="utf-8")
     elif not classes_path.exists():
         classes_path.write_text("enemy\n", encoding="utf-8")
+    write_default_runtime_config(paths, overwrite=False)
 
     print(f"Initialized project folders under {paths.root}")
     print(f"Edit class names in {classes_path} before annotation if needed.")
+
+
+def write_default_runtime_config(paths: ProjectPaths, overwrite: bool = False) -> None:
+    config_path = paths.root / "runtime_config.json"
+    if config_path.exists() and not overwrite:
+        print(f"Runtime config already exists: {config_path}")
+        return
+
+    config = {
+        "state_priority": ["CRASHED", "DISCONNECTED", "DEAD", "LOADING", "MENU", "COMBAT", "SEARCH"],
+        "combat_states": ["COMBAT", "SEARCH", "UNKNOWN"],
+        "ui_regions": [
+            {
+                "name": "black_screen",
+                "type": "brightness",
+                "roi": [0, 0, 1920, 1080],
+                "max_mean": 8,
+                "state": "LOADING",
+                "recovery_after": 15,
+                "recovery": {"type": "key", "key": "esc"},
+            },
+            {
+                "name": "dead_template",
+                "type": "template",
+                "roi": [700, 350, 520, 220],
+                "template": "ui_templates/dead.png",
+                "threshold": 0.86,
+                "state": "DEAD",
+                "recovery_after": 2,
+                "recovery": {"type": "key", "key": "enter"},
+                "enabled": False,
+            },
+            {
+                "name": "menu_template",
+                "type": "template",
+                "roi": [0, 0, 1920, 1080],
+                "template": "ui_templates/menu.png",
+                "threshold": 0.86,
+                "state": "MENU",
+                "recovery_after": 3,
+                "recovery": {"type": "key", "key": "esc"},
+                "enabled": False,
+            },
+            {
+                "name": "low_hp_red",
+                "type": "color",
+                "roi": [600, 820, 360, 35],
+                "color_bgr": [35, 35, 180],
+                "tolerance": 45,
+                "min_ratio": 0.08,
+                "state": "COMBAT",
+                "recovery_after": 1,
+                "recovery": {"type": "key", "key": "f1"},
+                "enabled": False,
+            },
+        ],
+        "no_target_recovery": {
+            "enabled": True,
+            "after_seconds": 8,
+            "cooldown": 4,
+            "action": {"type": "key", "key": "tab"},
+        },
+        "save_failure_frames": True,
+        "failure_frame_cooldown": 5,
+    }
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Runtime config written: {config_path}")
 
 
 def extract_frames(video: Path, output_dir: Path, fps: float, prefix: str | None) -> None:
@@ -532,6 +625,155 @@ def parse_roi(roi: str | None, monitor: dict) -> dict:
     return {"left": left, "top": top, "width": width, "height": height}
 
 
+def load_runtime_config(config_path: Path | None) -> dict:
+    if config_path is None or not config_path.exists():
+        return {
+            "state_priority": ["CRASHED", "DISCONNECTED", "DEAD", "LOADING", "MENU", "COMBAT", "SEARCH"],
+            "combat_states": ["COMBAT", "SEARCH", "UNKNOWN"],
+            "ui_regions": [],
+            "no_target_recovery": {"enabled": False},
+            "save_failure_frames": False,
+            "failure_frame_cooldown": 5,
+        }
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def crop_absolute_roi(frame_bgr, capture_area: dict, roi_values: list[int] | tuple[int, int, int, int]):
+    left, top, width, height = [int(value) for value in roi_values]
+    cap_left = int(capture_area["left"])
+    cap_top = int(capture_area["top"])
+    cap_right = cap_left + int(capture_area["width"])
+    cap_bottom = cap_top + int(capture_area["height"])
+    right = left + width
+    bottom = top + height
+
+    clipped_left = max(left, cap_left)
+    clipped_top = max(top, cap_top)
+    clipped_right = min(right, cap_right)
+    clipped_bottom = min(bottom, cap_bottom)
+    if clipped_right <= clipped_left or clipped_bottom <= clipped_top:
+        return None
+
+    x1 = clipped_left - cap_left
+    y1 = clipped_top - cap_top
+    x2 = clipped_right - cap_left
+    y2 = clipped_bottom - cap_top
+    return frame_bgr[y1:y2, x1:x2]
+
+
+def detect_ui_events(frame_bgr, capture_area: dict, runtime_config: dict, root: Path, template_cache: dict) -> list[UIEvent]:
+    import cv2
+    import numpy as np
+
+    events: list[UIEvent] = []
+    for region in runtime_config.get("ui_regions", []):
+        if region.get("enabled", True) is False:
+            continue
+        roi = region.get("roi")
+        if not roi:
+            continue
+        crop = crop_absolute_roi(frame_bgr, capture_area, roi)
+        if crop is None or crop.size == 0:
+            continue
+
+        region_type = region.get("type")
+        matched = False
+        score = 0.0
+
+        if region_type == "template":
+            template_path = root / str(region.get("template", ""))
+            if not template_path.is_file():
+                continue
+            template_key = str(template_path)
+            if template_key not in template_cache:
+                template_cache[template_key] = cv2.imread(template_key, cv2.IMREAD_COLOR)
+            template = template_cache.get(template_key)
+            if template is None or crop.shape[0] < template.shape[0] or crop.shape[1] < template.shape[1]:
+                continue
+            result = cv2.matchTemplate(crop, template, cv2.TM_CCOEFF_NORMED)
+            _, max_value, _, _ = cv2.minMaxLoc(result)
+            score = float(max_value)
+            matched = score >= float(region.get("threshold", 0.85))
+        elif region_type == "brightness":
+            mean_value = float(np.mean(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)))
+            min_mean = region.get("min_mean")
+            max_mean = region.get("max_mean")
+            score = mean_value
+            matched = (min_mean is None or mean_value >= float(min_mean)) and (max_mean is None or mean_value <= float(max_mean))
+        elif region_type == "color":
+            target = np.array(region.get("color_bgr", [0, 0, 0]), dtype=np.int16)
+            tolerance = int(region.get("tolerance", 30))
+            diff = np.abs(crop.astype(np.int16) - target)
+            mask = np.all(diff <= tolerance, axis=2)
+            ratio = float(np.count_nonzero(mask)) / float(mask.size)
+            score = ratio
+            matched = ratio >= float(region.get("min_ratio", 0.05))
+        else:
+            continue
+
+        if matched:
+            events.append(
+                UIEvent(
+                    name=str(region.get("name", region_type)),
+                    state=str(region.get("state", "UNKNOWN")),
+                    score=score,
+                    roi=tuple(int(value) for value in roi),
+                    recovery_after=float(region.get("recovery_after", 0)),
+                    recovery=dict(region.get("recovery", {})),
+                )
+            )
+    return events
+
+
+def derive_game_state(events: list[UIEvent], target: Detection | None, runtime_config: dict) -> str:
+    if events:
+        priority = runtime_config.get("state_priority", [])
+        states = {event.state for event in events}
+        for state in priority:
+            if state in states:
+                return str(state)
+        return events[0].state
+    if target:
+        return "COMBAT"
+    return "SEARCH"
+
+
+def execute_configured_action(controller: SendInputController, action: dict, dry_run_label: str) -> None:
+    action_type = action.get("type")
+    if not action_type:
+        return
+    if action_type == "key":
+        controller.press_key(str(action.get("key", "esc")))
+    elif action_type == "click":
+        x = action.get("x")
+        y = action.get("y")
+        if x is not None and y is not None:
+            controller.move_to(int(x), int(y))
+        controller.click(str(action.get("button", "left")))
+    elif action_type == "both":
+        x = action.get("x")
+        y = action.get("y")
+        if x is not None and y is not None:
+            controller.move_to(int(x), int(y))
+        controller.click(str(action.get("button", "left")))
+        controller.press_key(str(action.get("key", "space")))
+    else:
+        print(f"Unsupported recovery action for {dry_run_label}: {action_type}")
+
+
+def maybe_save_failure_frame(frame_bgr, paths: ProjectPaths, state: RuntimeState, runtime_config: dict, now: float) -> None:
+    if not runtime_config.get("save_failure_frames", False):
+        return
+    cooldown = float(runtime_config.get("failure_frame_cooldown", 5))
+    if now - state.last_recovery_ts < cooldown:
+        return
+    import cv2
+
+    ensure_dir(paths.failure_frames)
+    output = paths.failure_frames / f"{time.strftime('%Y%m%d_%H%M%S')}_{state.game_state}.jpg"
+    cv2.imwrite(str(output), frame_bgr)
+
+
 def detections_from_result(result, names: dict[int, str], offset_x: int, offset_y: int) -> list[Detection]:
     detections: list[Detection] = []
     if result.boxes is None:
@@ -582,14 +824,33 @@ def execute_runtime_action(
 def append_runtime_log(log_path: Path, row: dict) -> None:
     ensure_dir(log_path.parent)
     is_new = not log_path.exists()
-    keys = ["ts", "mode", "detections", "target", "confidence", "action_count", "dry_run"]
+    keys = [
+        "ts",
+        "game_state",
+        "mode",
+        "ui_events",
+        "detections",
+        "target",
+        "confidence",
+        "action_count",
+        "recovery_count",
+        "dry_run",
+    ]
     with log_path.open("a", encoding="utf-8") as file:
         if is_new:
             file.write(",".join(keys) + "\n")
         file.write(",".join(str(row.get(key, "")) for key in keys) + "\n")
 
 
-def draw_debug_frame(frame, detections: list[Detection], target: Detection | None, state: RuntimeState, roi_left: int, roi_top: int):
+def draw_debug_frame(
+    frame,
+    detections: list[Detection],
+    target: Detection | None,
+    state: RuntimeState,
+    ui_events: list[UIEvent],
+    roi_left: int,
+    roi_top: int,
+):
     import cv2
 
     for detection in detections:
@@ -599,7 +860,17 @@ def draw_debug_frame(frame, detections: list[Detection], target: Detection | Non
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         label = f"{detection.class_name} {detection.confidence:.2f}"
         cv2.putText(frame, label, (x1, max(20, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-    status = f"{state.mode} stable={state.stable_hits} lost={state.lost_hits} actions={state.action_count}"
+    for event in ui_events:
+        left, top, width, height = event.roi
+        x1, y1 = left - roi_left, top - roi_top
+        x2, y2 = x1 + width, y1 + height
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 255), 2)
+        cv2.putText(frame, f"{event.name}:{event.state}", (x1, max(20, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (30, 30, 255), 2)
+
+    status = (
+        f"{state.game_state}/{state.mode} stable={state.stable_hits} lost={state.lost_hits} "
+        f"actions={state.action_count} recovery={state.recovery_count}"
+    )
     cv2.putText(frame, status, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
     return frame
 
@@ -607,6 +878,7 @@ def draw_debug_frame(frame, detections: list[Detection], target: Detection | Non
 def run_realtime(
     paths: ProjectPaths,
     weights: Path,
+    runtime_config_path: Path | None,
     monitor_index: int,
     roi: str | None,
     target_class: str | None,
@@ -637,11 +909,16 @@ def run_realtime(
 
     model = YOLO(str(weights))
     controller = SendInputController(dry_run=dry_run)
-    state = RuntimeState()
+    state = RuntimeState(last_target_ts=time.monotonic())
+    runtime_config = load_runtime_config(runtime_config_path)
+    template_cache: dict = {}
+    ui_seen_since: dict[str, float] = {}
     log_path = paths.runtime_logs / f"runtime_{time.strftime('%Y%m%d_%H%M%S')}.csv"
 
     print("Runtime started.")
     print(f"Stop key: {stop_key}. Dry-run: {dry_run}. Debug window: {debug}.")
+    if runtime_config_path:
+        print(f"Runtime config: {runtime_config_path}")
     print("For fullscreen games, run the game in borderless fullscreen first if exclusive fullscreen capture is black.")
 
     with mss.mss() as screen:
@@ -664,10 +941,20 @@ def run_realtime(
             detections = detections_from_result(results[0], model.names, roi_left, roi_top)
             target = choose_target(detections, target_class)
             now = time.monotonic()
+            ui_events = detect_ui_events(frame_bgr, capture_area, runtime_config, paths.root, template_cache)
+            state.ui_events = "|".join(f"{event.name}:{event.state}:{event.score:.3f}" for event in ui_events)
+            state.game_state = derive_game_state(ui_events, target, runtime_config)
+            active_ui_names = {event.name for event in ui_events}
+            for event in ui_events:
+                ui_seen_since.setdefault(event.name, now)
+            for event_name in list(ui_seen_since):
+                if event_name not in active_ui_names:
+                    del ui_seen_since[event_name]
 
             if target:
                 state.stable_hits += 1
                 state.lost_hits = 0
+                state.last_target_ts = now
                 state.mode = "TARGET_LOCKED" if state.stable_hits >= stable_frames else "CONFIRMING"
             else:
                 state.lost_hits += 1
@@ -675,27 +962,63 @@ def run_realtime(
                     state.stable_hits = 0
                     state.mode = "SEARCH"
 
-            if target and state.stable_hits >= stable_frames and now - state.last_action_ts >= cooldown:
+            combat_states = set(str(item) for item in runtime_config.get("combat_states", ["COMBAT", "SEARCH", "UNKNOWN"]))
+            can_combat_act = state.game_state in combat_states
+
+            if can_combat_act and target and state.stable_hits >= stable_frames and now - state.last_action_ts >= cooldown:
                 execute_runtime_action(controller, target, action, key, mouse_button, aim)
                 state.last_action_ts = now
                 state.action_count += 1
                 state.mode = "ACTION"
+            elif not can_combat_act:
+                state.mode = "RECOVERY_PENDING"
+
+            recovery_event = next((event for event in ui_events if event.recovery and event.recovery_after >= 0), None)
+            if (
+                recovery_event
+                and now - ui_seen_since.get(recovery_event.name, now) >= recovery_event.recovery_after
+                and now - state.last_recovery_ts >= max(1.0, recovery_event.recovery_after)
+            ):
+                print(f"Recovery for UI event: {recovery_event.name} -> {recovery_event.recovery}")
+                maybe_save_failure_frame(frame_bgr, paths, state, runtime_config, now)
+                execute_configured_action(controller, recovery_event.recovery, recovery_event.name)
+                state.last_recovery_ts = now
+                state.recovery_count += 1
+                state.mode = "RECOVERY"
+
+            no_target_recovery = runtime_config.get("no_target_recovery", {})
+            if (
+                can_combat_act
+                and no_target_recovery.get("enabled", False)
+                and not target
+                and now - state.last_target_ts >= float(no_target_recovery.get("after_seconds", 8))
+                and now - state.last_recovery_ts >= float(no_target_recovery.get("cooldown", 4))
+            ):
+                print(f"No target recovery: {no_target_recovery.get('action', {})}")
+                maybe_save_failure_frame(frame_bgr, paths, state, runtime_config, now)
+                execute_configured_action(controller, dict(no_target_recovery.get("action", {})), "no_target")
+                state.last_recovery_ts = now
+                state.recovery_count += 1
+                state.mode = "NO_TARGET_RECOVERY"
 
             append_runtime_log(
                 log_path,
                 {
                     "ts": f"{time.time():.3f}",
+                    "game_state": state.game_state,
                     "mode": state.mode,
+                    "ui_events": state.ui_events,
                     "detections": len(detections),
                     "target": target.class_name if target else "",
                     "confidence": f"{target.confidence:.3f}" if target else "",
                     "action_count": state.action_count,
+                    "recovery_count": state.recovery_count,
                     "dry_run": dry_run,
                 },
             )
 
             if debug:
-                debug_frame = draw_debug_frame(frame_bgr, detections, target, state, roi_left, roi_top)
+                debug_frame = draw_debug_frame(frame_bgr, detections, target, state, ui_events, roi_left, roi_top)
                 fps = 1.0 / max(0.001, time.perf_counter() - loop_start)
                 cv2.putText(debug_frame, f"FPS {fps:.1f}", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
                 cv2.imshow("game-agent-runtime", debug_frame)
@@ -714,6 +1037,9 @@ def parse_args() -> argparse.Namespace:
 
     init = sub.add_parser("init", help="Create first-stage project folders.")
     init.add_argument("--classes", nargs="*", default=[], help="Initial class names, e.g. enemy hp_bar item.")
+
+    runtime_config = sub.add_parser("init-runtime-config", help="Create or overwrite runtime_config.json.")
+    runtime_config.add_argument("--overwrite", action="store_true", help="Overwrite existing runtime_config.json.")
 
     extract = sub.add_parser("extract", help="Extract video frames with ffmpeg.")
     extract.add_argument("video", type=Path, help="Input video path.")
@@ -748,6 +1074,7 @@ def parse_args() -> argparse.Namespace:
 
     run = sub.add_parser("run", help="Run realtime fullscreen detection and low-level input control.")
     run.add_argument("weights", type=Path, help="Trained weights path, usually models/game_yolo/weights/best.pt.")
+    run.add_argument("--runtime-config", type=Path, default=None, help="Runtime config JSON. Default: runtime_config.json if it exists.")
     run.add_argument("--monitor", type=int, default=1, help="MSS monitor index. 1 is primary monitor; 0 captures all monitors.")
     run.add_argument("--roi", default=None, help="Optional capture ROI: left,top,width,height. Use screen coordinates.")
     run.add_argument("--target-class", default=None, help="Class name to trigger on. Default: any detected class.")
@@ -775,6 +1102,8 @@ def main() -> None:
 
     if args.command == "init":
         init_project(paths, args.classes)
+    elif args.command == "init-runtime-config":
+        write_default_runtime_config(paths, overwrite=args.overwrite)
     elif args.command == "extract":
         extract_frames(args.video.resolve(), (args.out or paths.raw_frames).resolve(), args.fps, args.prefix)
     elif args.command == "review":
@@ -788,9 +1117,13 @@ def main() -> None:
     elif args.command == "val":
         validate_yolo(paths, args.weights.resolve(), args.imgsz, args.device)
     elif args.command == "run":
+        runtime_config_path = args.runtime_config
+        if runtime_config_path is None and (paths.root / "runtime_config.json").exists():
+            runtime_config_path = paths.root / "runtime_config.json"
         run_realtime(
             paths=paths,
             weights=args.weights.resolve(),
+            runtime_config_path=runtime_config_path.resolve() if runtime_config_path else None,
             monitor_index=args.monitor,
             roi=args.roi,
             target_class=args.target_class,

@@ -3,7 +3,7 @@
 本项目当前包含两个阶段：
 
 - 第一阶段：录屏抽帧、筛选、标注、YOLO 数据集构建、训练和验证。
-- 第二阶段：全屏截图、YOLO 实时识别、状态机防抖、Windows `SendInput` 底层键鼠动作执行。
+- 第二阶段：全屏截图、YOLO 实时识别、固定 UI 区域识别、游戏状态层、异常恢复、Windows `SendInput` 底层键鼠动作执行。
 
 ## 依赖
 
@@ -25,8 +25,10 @@ pip install -r requirements.txt
 - `datasets/game_yolo/`：自动生成的 YOLO 训练集。
 - `models/`：训练输出。
 - `reports/`：数据集摘要、验证结果、筛选 HTML。
-- `runtime_logs/`：第二阶段实时运行日志。
+- `ui_templates/`：固定 UI 模板图，例如死亡、菜单、断线弹窗。
+- `runtime_logs/`：第二阶段实时运行日志和失败帧。
 - `classes.txt`：类别名，一行一个，顺序必须与标注工具中的类别顺序一致。
+- `runtime_config.json`：第二阶段 UI 检测、状态层和异常恢复配置。
 
 ### 推荐流程
 
@@ -109,6 +111,97 @@ python main.py inspect
 - 如果有多显示器，使用 `--monitor` 选择显示器。`1` 通常是主显示器，`0` 表示所有显示器组成的虚拟桌面。
 - 可以用 `--roi left,top,width,height` 只截取游戏区域，降低延迟。
 
+### 固定 UI 区域识别
+
+借鉴 LostArk-Endless-Chaos 的经验，项目现在支持固定 UI 区域识别。配置在 `runtime_config.json` 的 `ui_regions` 中。
+
+支持三种检测类型：
+
+- `template`：模板匹配，适合死亡提示、菜单、确认按钮、断线弹窗。
+- `brightness`：亮度判断，适合黑屏、加载页、极暗异常画面。
+- `color`：颜色占比，适合血条、蓝条、小地图颜色点、技能冷却遮罩。
+
+模板配置示例：
+
+```json
+{
+  "name": "dead_template",
+  "type": "template",
+  "roi": [700, 350, 520, 220],
+  "template": "ui_templates/dead.png",
+  "threshold": 0.86,
+  "state": "DEAD",
+  "recovery_after": 2,
+  "recovery": {"type": "key", "key": "enter"},
+  "enabled": true
+}
+```
+
+颜色检测示例：
+
+```json
+{
+  "name": "low_hp_red",
+  "type": "color",
+  "roi": [600, 820, 360, 35],
+  "color_bgr": [35, 35, 180],
+  "tolerance": 45,
+  "min_ratio": 0.08,
+  "state": "COMBAT",
+  "recovery_after": 1,
+  "recovery": {"type": "key", "key": "f1"},
+  "enabled": true
+}
+```
+
+注意：`roi` 使用屏幕绝对坐标，格式是 `[left, top, width, height]`。
+
+### 游戏状态层
+
+实时循环现在会先根据固定 UI 检测结果推导 `game_state`，再决定是否执行 YOLO 战斗动作。
+
+默认状态优先级：
+
+```json
+["CRASHED", "DISCONNECTED", "DEAD", "LOADING", "MENU", "COMBAT", "SEARCH"]
+```
+
+默认允许执行战斗动作的状态：
+
+```json
+["COMBAT", "SEARCH", "UNKNOWN"]
+```
+
+如果检测到 `DEAD`、`LOADING`、`MENU` 等非战斗状态，主循环会暂停普通攻击动作，优先执行配置的恢复动作。
+
+### 异常恢复
+
+支持两类恢复：
+
+- UI 事件恢复：某个 UI 状态持续超过 `recovery_after` 后执行恢复动作。
+- 无目标恢复：长时间没有 YOLO 目标时执行探索动作。
+
+无目标恢复配置示例：
+
+```json
+"no_target_recovery": {
+  "enabled": true,
+  "after_seconds": 8,
+  "cooldown": 4,
+  "action": {"type": "key", "key": "tab"}
+}
+```
+
+支持的恢复动作：
+
+```json
+{"type": "key", "key": "esc"}
+{"type": "click", "x": 960, "y": 540, "button": "left"}
+{"type": "both", "x": 960, "y": 540, "button": "left", "key": "space"}
+```
+
+恢复触发时会写入 `runtime_logs/*.csv`。如果 `save_failure_frames` 为 `true`，还会保存失败帧到 `runtime_logs/failure_frames/`，便于后续补标和调参。
+
 ### 调试运行，不执行动作
 
 ```bash
@@ -119,8 +212,23 @@ python main.py run models/game_yolo/weights/best.pt --target-class enemy --debug
 
 - 识别 `enemy` 类别。
 - 显示 OpenCV 调试窗口。
+- 显示 YOLO 框和 UI 区域命中框。
 - 不发送键鼠动作。
 - 连续稳定识别到目标后，只打印 dry-run 动作。
+
+### 指定运行配置
+
+默认会自动读取项目根目录下的 `runtime_config.json`。也可以手动指定：
+
+```bash
+python main.py run models/game_yolo/weights/best.pt --runtime-config runtime_config.json --target-class enemy --debug --dry-run
+```
+
+重新生成默认配置：
+
+```bash
+python main.py init-runtime-config --overwrite
+```
 
 ### 执行按键动作
 
@@ -174,4 +282,5 @@ python main.py run models/game_yolo/weights/best.pt --target-class enemy --stabl
 - `classes.txt` 的顺序不要在标注后随意改，否则标签类别会错位。
 - 抽帧频率不宜过高，初期建议 `--fps 2` 到 `--fps 5`。
 - 训练前先保证 `data/annotated/images` 和 `data/annotated/labels` 中的文件能一一对应。
-- 第二阶段不要一开始就关闭 `--dry-run`，先确认识别框、类别名、目标中心和触发节奏都正确。
+- 第二阶段不要一开始就关闭 `--dry-run`，先确认识别框、类别名、目标中心、UI 区域和触发节奏都正确。
+- 固定 UI 规则要从最稳定的目标开始加，例如死亡提示、加载黑屏、菜单按钮，不要一开始配置太多规则。

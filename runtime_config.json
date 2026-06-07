@@ -1,0 +1,108 @@
+{
+  "state_priority": [
+    "CRASHED",
+    "DISCONNECTED",
+    "DEAD",
+    "LOADING",
+    "MENU",
+    "COMBAT",
+    "SEARCH"
+  ],
+  "combat_states": [
+    "COMBAT",
+    "SEARCH",
+    "UNKNOWN"
+  ],
+  "ui_regions": [
+    {
+      "name": "black_screen",
+      "type": "brightness",
+      "roi": [
+        0,
+        0,
+        1920,
+        1080
+      ],
+      "max_mean": 8,
+      "state": "LOADING",
+      "recovery_after": 15,
+      "recovery": {
+        "type": "key",
+        "key": "esc"
+      }
+    },
+    {
+      "name": "dead_template",
+      "type": "template",
+      "roi": [
+        700,
+        350,
+        520,
+        220
+      ],
+      "template": "ui_templates/dead.png",
+      "threshold": 0.86,
+      "state": "DEAD",
+      "recovery_after": 2,
+      "recovery": {
+        "type": "key",
+        "key": "enter"
+      },
+      "enabled": false
+    },
+    {
+      "name": "menu_template",
+      "type": "template",
+      "roi": [
+        0,
+        0,
+        1920,
+        1080
+      ],
+      "template": "ui_templates/menu.png",
+      "threshold": 0.86,
+      "state": "MENU",
+      "recovery_after": 3,
+      "recovery": {
+        "type": "key",
+        "key": "esc"
+      },
+      "enabled": false
+    },
+    {
+      "name": "low_hp_red",
+      "type": "color",
+      "roi": [
+        600,
+        820,
+        360,
+        35
+      ],
+      "color_bgr": [
+        35,
+        35,
+        180
+      ],
+      "tolerance": 45,
+      "min_ratio": 0.08,
+      "state": "COMBAT",
+      "recovery_after": 1,
+      "recovery": {
+        "type": "key",
+        "key": "f1"
+      },
+      "enabled": false
+    }
+  ],
+  "no_target_recovery": {
+    "enabled": true,
+    "after_seconds": 8,
+    "cooldown": 4,
+    "action": {
+      "type": "key",
+      "key": "tab"
+    }
+  },
+  "save_failure_frames": true,
+  "failure_frame_cooldown": 5
+}
