@@ -30,6 +30,7 @@ python main.py gui
 - 打开 `raw_frames`、`selected_frames`、`annotated/images`、`annotated/labels` 目录。
 - 保存 `classes.txt` 类别名。
 - 把 `selected_frames` 复制到 `annotated/images`。
+- 安装/修复并启动 LabelImg。
 - 构建 YOLO 数据集。
 - 启动 YOLO 训练。
 
@@ -39,7 +40,8 @@ python main.py gui
 选择视频 -> 开始抽帧 -> 生成筛选页面 -> 打开筛选页面
 -> 手工复制有价值图片到 selected_frames
 -> 已筛选图片复制到 annotated/images
--> 用 LabelImg 标注
+-> 安装/修复 LabelImg
+-> 启动 LabelImg 并标注
 -> 构建数据集
 -> 训练 YOLO
 ```
@@ -317,5 +319,6 @@ python main.py run models/game_yolo/weights/best.pt --target-class enemy --stabl
 - 训练前先保证 `data/annotated/images` 和 `data/annotated/labels` 中的文件能一一对应。
 - 第二阶段不要一开始就关闭 `--dry-run`，先确认识别框、类别名、目标中心、UI 区域和触发节奏都正确。
 - 固定 UI 规则要从最稳定的目标开始加，例如死亡提示、加载黑屏、菜单按钮，不要一开始配置太多规则。
+
 
 

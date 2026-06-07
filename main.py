@@ -298,6 +298,32 @@ def find_executable(name: str) -> str:
     return name
 
 
+def project_python(paths: ProjectPaths) -> Path:
+    venv_python = paths.root / ".venv" / "Scripts" / "python.exe"
+    if venv_python.exists():
+        return venv_python
+    return Path(sys.executable)
+
+
+def find_labelimg_executable(paths: ProjectPaths) -> Path | None:
+    candidates = [
+        paths.root / ".venv" / "Scripts" / "labelImg.exe",
+        paths.root / ".venv" / "Scripts" / "labelimg.exe",
+    ]
+    which_labelimg = shutil.which("labelImg") or shutil.which("labelimg")
+    if which_labelimg:
+        candidates.append(Path(which_labelimg))
+
+    local_python = Path(os.environ.get("LOCALAPPDATA", "")) / "Python"
+    if local_python.exists():
+        candidates.extend(sorted(local_python.rglob("Scripts/labelImg.exe")))
+
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    return None
+
+
 def run_command(command: list[str]) -> None:
     print("Running:", " ".join(str(part) for part in command))
     try:
@@ -1154,6 +1180,20 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     def do_copy_to_annotated() -> None:
         copy_images(paths.selected_frames.resolve(), (paths.annotated / "images").resolve())
 
+    def do_install_labelimg() -> None:
+        python_exe = project_python(paths)
+        run_command([str(python_exe), "-m", "pip", "install", "labelImg"])
+
+    def launch_labelimg() -> None:
+        ensure_dir(paths.annotated / "images")
+        ensure_dir(paths.annotated / "labels")
+        executable = find_labelimg_executable(paths)
+        if executable is None:
+            messagebox.showwarning("未找到 LabelImg", "没有找到 LabelImg。请先点击“安装/修复 LabelImg”。")
+            return
+        subprocess.Popen([str(executable)], cwd=str(paths.root))
+        log(f"已启动 LabelImg：{executable}")
+
     def do_build_dataset() -> None:
         build_dataset(paths, float(val_var.get()), float(test_var.get()), 42)
 
@@ -1207,6 +1247,8 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     ttk.Entry(annotate_box, textvariable=classes_var).pack(fill="x", padx=10, pady=(0, 6))
     ttk.Button(annotate_box, text="保存 classes.txt", command=save_classes).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="已筛选图片复制到 annotated/images", command=lambda: run_background("复制到 annotated/images", do_copy_to_annotated)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="安装/修复 LabelImg", command=lambda: run_background("安装/修复 LabelImg", do_install_labelimg)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="启动 LabelImg", command=launch_labelimg).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="打开标注图片目录 annotated/images", command=lambda: open_path(paths.annotated / "images")).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="打开标签目录 annotated/labels", command=lambda: open_path(paths.annotated / "labels")).pack(fill="x", padx=10, pady=(6, 10))
 
