@@ -310,14 +310,6 @@ def find_labelimg_executable(paths: ProjectPaths) -> Path | None:
         paths.root / ".venv" / "Scripts" / "labelImg.exe",
         paths.root / ".venv" / "Scripts" / "labelimg.exe",
     ]
-    which_labelimg = shutil.which("labelImg") or shutil.which("labelimg")
-    if which_labelimg:
-        candidates.append(Path(which_labelimg))
-
-    local_python = Path(os.environ.get("LOCALAPPDATA", "")) / "Python"
-    if local_python.exists():
-        candidates.extend(sorted(local_python.rglob("Scripts/labelImg.exe")))
-
     for candidate in candidates:
         if candidate and candidate.exists():
             return candidate
