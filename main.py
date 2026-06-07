@@ -656,6 +656,11 @@ def validate_yolo(paths: ProjectPaths, weights: Path, imgsz: int, device: str | 
     run_command(command)
 
 
+def latest_best_weights(paths: ProjectPaths) -> Path | None:
+    candidates = sorted(paths.models.glob("**/weights/best.pt"), key=lambda item: item.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
 def inspect_dataset(paths: ProjectPaths) -> None:
     classes_file = paths.root / "classes.txt"
     classes = read_classes(classes_file) if classes_file.exists() else []
@@ -1154,6 +1159,31 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def run_streamed_command(label: str, command: list[str], output_log: Path) -> None:
+        ensure_dir(output_log.parent)
+        output_log.write_text(f"开始时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n命令：{' '.join(command)}\n\n", encoding="utf-8")
+        process = subprocess.Popen(
+            command,
+            cwd=str(paths.root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        with output_log.open("a", encoding="utf-8") as file:
+            assert process.stdout is not None
+            for line in process.stdout:
+                clean_line = line.rstrip()
+                file.write(line)
+                file.flush()
+                if clean_line:
+                    root.after(0, lambda text=clean_line: log(text))
+        exit_code = process.wait()
+        if exit_code != 0:
+            raise RuntimeError(f"{label} 失败，退出码：{exit_code}。查看日志：{output_log}")
+
     def pick_video() -> None:
         initial_dir = paths.raw_videos if paths.raw_videos.exists() else paths.root
         file_path = filedialog.askopenfilename(
@@ -1180,6 +1210,13 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
         ensure_dir(log_path.parent)
         if not log_path.exists():
             log_path.write_text("还没有 LabelImg 日志。请先启动 LabelImg。\n", encoding="utf-8")
+        os.startfile(str(log_path))
+
+    def open_runtime_log_file(name: str) -> None:
+        log_path = paths.runtime_logs / name
+        ensure_dir(log_path.parent)
+        if not log_path.exists():
+            log_path.write_text(f"还没有 {name}。\n", encoding="utf-8")
         os.startfile(str(log_path))
 
     def save_classes() -> None:
@@ -1266,7 +1303,41 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
         build_dataset(paths, float(val_var.get()), float(test_var.get()), 42)
 
     def do_train() -> None:
-        train_yolo(paths, model_var.get().strip(), int(epochs_var.get()), int(imgsz_var.get()), int(batch_var.get()), None)
+        data_yaml = paths.dataset / "data.yaml"
+        require_file(data_yaml, "YOLO data.yaml")
+        command = [
+            str(project_python(paths)),
+            "-m",
+            "ultralytics",
+            "train",
+            f"model={model_var.get().strip()}",
+            f"data={data_yaml}",
+            f"epochs={int(epochs_var.get())}",
+            f"imgsz={int(imgsz_var.get())}",
+            f"batch={int(batch_var.get())}",
+            f"project={paths.models}",
+            "name=game_yolo",
+        ]
+        run_streamed_command("训练 YOLO", command, paths.runtime_logs / "train_last.log")
+
+    def do_validate_latest() -> None:
+        weights = latest_best_weights(paths)
+        if weights is None:
+            raise RuntimeError("没有找到 best.pt。请先完成训练。")
+        data_yaml = paths.dataset / "data.yaml"
+        require_file(data_yaml, "YOLO data.yaml")
+        command = [
+            str(project_python(paths)),
+            "-m",
+            "ultralytics",
+            "val",
+            f"model={weights}",
+            f"data={data_yaml}",
+            f"imgsz={int(imgsz_var.get())}",
+            f"project={paths.reports}",
+            "name=val",
+        ]
+        run_streamed_command("验证最新模型", command, paths.runtime_logs / "val_last.log")
 
     style = ttk.Style()
     style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
@@ -1368,6 +1439,12 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     ttk.Label(train_row_2, text="batch").pack(side="left")
     ttk.Entry(train_row_2, width=6, textvariable=batch_var).pack(side="left", padx=(4, 12))
     ttk.Button(train_row_2, text="训练 YOLO", command=lambda: run_background("训练 YOLO", do_train)).pack(side="right")
+
+    train_row_3 = ttk.Frame(dataset_box)
+    train_row_3.pack(fill="x", padx=10, pady=(0, 10))
+    ttk.Button(train_row_3, text="打开训练日志", command=lambda: open_runtime_log_file("train_last.log")).pack(side="left")
+    ttk.Button(train_row_3, text="验证最新模型", command=lambda: run_background("验证最新模型", do_validate_latest)).pack(side="left", padx=8)
+    ttk.Button(train_row_3, text="打开验证日志", command=lambda: open_runtime_log_file("val_last.log")).pack(side="left")
 
     guide = ttk.LabelFrame(right, text="流程说明", style="Step.TLabelframe")
     guide.pack(fill="x", pady=(0, 10))

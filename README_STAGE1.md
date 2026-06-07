@@ -269,6 +269,43 @@ python main.py run models/game_yolo/weights/best.pt --runtime-config runtime_con
 python main.py init-runtime-config --overwrite
 ```
 
+
+### 训练日志与验证
+
+GUI 中点击 `训练 YOLO` 后，训练输出会实时显示在右侧日志框，并保存到：
+
+```text
+runtime_logs/train_last.log
+```
+
+训练完成后，通常会生成：
+
+```text
+models/game_yolo/weights/best.pt
+models/game_yolo/weights/last.pt
+```
+
+下一步点击 GUI 中的：
+
+```text
+验证最新模型
+```
+
+验证输出会保存到：
+
+```text
+runtime_logs/val_last.log
+```
+
+验证结果重点看：
+
+- `mAP50`：粗略检测能力，越高越好。
+- `mAP50-95`：更严格的定位质量。
+- `precision`：误检少不少。
+- `recall`：漏检少不少。
+
+初版模型建议先追求能稳定识别，不要只看分数。验证通过后，再进入第二阶段 `run --debug --dry-run` 做实时画面测试。
+
 ### 执行按键动作
 
 例如稳定识别到 `enemy` 后按 `space`：
@@ -323,6 +360,7 @@ python main.py run models/game_yolo/weights/best.pt --target-class enemy --stabl
 - 训练前先保证 `data/annotated/images` 和 `data/annotated/labels` 中的文件能一一对应。
 - 第二阶段不要一开始就关闭 `--dry-run`，先确认识别框、类别名、目标中心、UI 区域和触发节奏都正确。
 - 固定 UI 规则要从最稳定的目标开始加，例如死亡提示、加载黑屏、菜单按钮，不要一开始配置太多规则。
+
 
 
 
