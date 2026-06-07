@@ -316,6 +316,31 @@ def find_labelimg_executable(paths: ProjectPaths) -> Path | None:
     return None
 
 
+def patch_labelimg_pyqt_compat(paths: ProjectPaths) -> bool:
+    canvas_path = paths.root / ".venv" / "Lib" / "site-packages" / "libs" / "canvas.py"
+    if not canvas_path.exists():
+        return False
+    text = canvas_path.read_text(encoding="utf-8")
+    original = text
+    replacements = {
+        "p.drawRect(left_top.x(), left_top.y(), rect_width, rect_height)": (
+            "p.drawRect(int(left_top.x()), int(left_top.y()), int(rect_width), int(rect_height))"
+        ),
+        "p.drawLine(self.prev_point.x(), 0, self.prev_point.x(), self.pixmap.height())": (
+            "p.drawLine(int(self.prev_point.x()), 0, int(self.prev_point.x()), int(self.pixmap.height()))"
+        ),
+        "p.drawLine(0, self.prev_point.y(), self.pixmap.width(), self.prev_point.y())": (
+            "p.drawLine(0, int(self.prev_point.y()), int(self.pixmap.width()), int(self.prev_point.y()))"
+        ),
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    if text != original:
+        canvas_path.write_text(text, encoding="utf-8")
+        return True
+    return False
+
+
 def run_command(command: list[str]) -> None:
     print("Running:", " ".join(str(part) for part in command))
     try:
@@ -1150,6 +1175,13 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
             return
         webbrowser.open(review_path.resolve().as_uri())
 
+    def open_labelimg_log() -> None:
+        log_path = paths.runtime_logs / "labelimg_last.log"
+        ensure_dir(log_path.parent)
+        if not log_path.exists():
+            log_path.write_text("还没有 LabelImg 日志。请先启动 LabelImg。\n", encoding="utf-8")
+        os.startfile(str(log_path))
+
     def save_classes() -> None:
         classes = [item.strip() for item in classes_var.get().replace("\n", ",").split(",") if item.strip()]
         if not classes:
@@ -1175,6 +1207,8 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     def do_install_labelimg() -> None:
         python_exe = project_python(paths)
         run_command([str(python_exe), "-m", "pip", "install", "labelImg"])
+        if patch_labelimg_pyqt_compat(paths):
+            log("已修复 LabelImg 与新版 PyQt 的兼容问题。")
 
     def launch_labelimg() -> None:
         ensure_dir(paths.annotated / "images")
@@ -1183,8 +1217,23 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
         if executable is None:
             messagebox.showwarning("未找到 LabelImg", "没有找到 LabelImg。请先点击“安装/修复 LabelImg”。")
             return
-        subprocess.Popen([str(executable)], cwd=str(paths.root))
+        if patch_labelimg_pyqt_compat(paths):
+            log("已修复 LabelImg 与新版 PyQt 的兼容问题。")
+        ensure_dir(paths.runtime_logs)
+        log_path = paths.runtime_logs / "labelimg_last.log"
+        log_file = log_path.open("w", encoding="utf-8")
+        log_file.write(f"启动时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log_file.write(f"程序路径：{executable}\n\n")
+        log_file.flush()
+        subprocess.Popen(
+            [str(executable)],
+            cwd=str(paths.root),
+            stdout=log_file,
+            stderr=log_file,
+            close_fds=False,
+        )
         log(f"已启动 LabelImg：{executable}")
+        log(f"LabelImg 错误日志：{log_path}")
 
     def do_build_dataset() -> None:
         build_dataset(paths, float(val_var.get()), float(test_var.get()), 42)
@@ -1241,6 +1290,7 @@ def launch_stage1_gui(paths: ProjectPaths) -> None:
     ttk.Button(annotate_box, text="已筛选图片复制到 annotated/images", command=lambda: run_background("复制到 annotated/images", do_copy_to_annotated)).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="安装/修复 LabelImg", command=lambda: run_background("安装/修复 LabelImg", do_install_labelimg)).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="启动 LabelImg", command=launch_labelimg).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="打开 LabelImg 错误日志", command=open_labelimg_log).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="打开标注图片目录 annotated/images", command=lambda: open_path(paths.annotated / "images")).pack(fill="x", padx=10, pady=6)
     ttk.Button(annotate_box, text="打开标签目录 annotated/labels", command=lambda: open_path(paths.annotated / "labels")).pack(fill="x", padx=10, pady=(6, 10))
 
