@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import random
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -282,6 +285,19 @@ def require_file(path: Path, description: str) -> None:
         raise SystemExit(f"{description} not found: {path}")
 
 
+def find_executable(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    if os.name == "nt" and name.lower() == "ffmpeg":
+        package_root = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+        if package_root.exists():
+            matches = sorted(package_root.rglob("ffmpeg.exe"))
+            if matches:
+                return str(matches[-1])
+    return name
+
+
 def run_command(command: list[str]) -> None:
     print("Running:", " ".join(str(part) for part in command))
     try:
@@ -396,8 +412,9 @@ def extract_frames(video: Path, output_dir: Path, fps: float, prefix: str | None
     ensure_dir(output_dir)
     frame_prefix = prefix or video.stem
     output_pattern = output_dir / f"{frame_prefix}_%06d.jpg"
+    ffmpeg = find_executable("ffmpeg")
     run_command([
-        "ffmpeg",
+        ffmpeg,
         "-hide_banner",
         "-y",
         "-i",
@@ -1030,6 +1047,226 @@ def run_realtime(
     print(f"Runtime log written: {log_path}")
 
 
+def launch_stage1_gui(paths: ProjectPaths) -> None:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    init_project(paths, [])
+
+    root = tk.Tk()
+    root.title("Game AI - Stage 1 Visual Pipeline")
+    root.geometry("980x700")
+    root.minsize(900, 620)
+
+    video_var = tk.StringVar()
+    fps_var = tk.StringVar(value="2")
+    classes_var = tk.StringVar(value=", ".join(read_classes(paths.root / "classes.txt")))
+    val_var = tk.StringVar(value="0.2")
+    test_var = tk.StringVar(value="0.1")
+    model_var = tk.StringVar(value="yolov8n.pt")
+    epochs_var = tk.StringVar(value="80")
+    imgsz_var = tk.StringVar(value="640")
+    batch_var = tk.StringVar(value="16")
+    status_var = tk.StringVar(value="Ready")
+    running = {"active": False}
+
+    def log(message: str) -> None:
+        log_box.insert("end", f"{time.strftime('%H:%M:%S')}  {message}\n")
+        log_box.see("end")
+
+    def refresh_counts() -> None:
+        raw_count = len(iter_images(paths.raw_frames))
+        selected_count = len(iter_images(paths.selected_frames))
+        annotated_images = len(iter_images(paths.annotated / "images"))
+        annotated_labels = len(list((paths.annotated / "labels").glob("*.txt"))) if (paths.annotated / "labels").exists() else 0
+        train_count = len(iter_images(paths.dataset / "images" / "train"))
+        val_count = len(iter_images(paths.dataset / "images" / "val"))
+        test_count = len(iter_images(paths.dataset / "images" / "test"))
+        counts_var.set(
+            f"raw_frames: {raw_count}    selected: {selected_count}    "
+            f"annotated: {annotated_images} images / {annotated_labels} labels    "
+            f"dataset: train {train_count}, val {val_count}, test {test_count}"
+        )
+
+    def run_background(label: str, task) -> None:
+        if running["active"]:
+            messagebox.showinfo("Task running", "A task is already running. Wait for it to finish.")
+            return
+
+        def worker() -> None:
+            running["active"] = True
+            root.after(0, lambda: status_var.set(f"Running: {label}"))
+            root.after(0, lambda: log(f"START {label}"))
+            try:
+                task()
+            except Exception as exc:
+                root.after(0, lambda: log(f"ERROR {label}: {exc}"))
+                root.after(0, lambda: messagebox.showerror(label, str(exc)))
+            else:
+                root.after(0, lambda: log(f"DONE {label}"))
+            finally:
+                running["active"] = False
+                root.after(0, refresh_counts)
+                root.after(0, lambda: status_var.set("Ready"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def pick_video() -> None:
+        initial_dir = paths.raw_videos if paths.raw_videos.exists() else paths.root
+        file_path = filedialog.askopenfilename(
+            initialdir=str(initial_dir),
+            title="Select gameplay video",
+            filetypes=[("Video files", "*.mp4 *.mkv *.mov *.avi"), ("All files", "*.*")],
+        )
+        if file_path:
+            video_var.set(file_path)
+
+    def open_path(path: Path) -> None:
+        ensure_dir(path if path.suffix == "" else path.parent)
+        os.startfile(str(path))
+
+    def open_review() -> None:
+        review_path = paths.reports / "frame_review.html"
+        if not review_path.exists():
+            messagebox.showwarning("Missing review", "Generate the review page first.")
+            return
+        webbrowser.open(review_path.resolve().as_uri())
+
+    def save_classes() -> None:
+        classes = [item.strip() for item in classes_var.get().replace("\n", ",").split(",") if item.strip()]
+        if not classes:
+            messagebox.showwarning("Classes required", "Enter at least one class name.")
+            return
+        (paths.root / "classes.txt").write_text("\n".join(classes) + "\n", encoding="utf-8")
+        log(f"Saved classes: {', '.join(classes)}")
+
+    def do_extract() -> None:
+        video = Path(video_var.get().strip())
+        fps = float(fps_var.get())
+        extract_frames(video.resolve(), paths.raw_frames.resolve(), fps, None)
+
+    def do_review() -> None:
+        write_review_manifest(paths.raw_frames.resolve(), (paths.reports / "frame_review.html").resolve(), "Frame Review")
+
+    def do_select_all() -> None:
+        copy_images(paths.raw_frames.resolve(), paths.selected_frames.resolve())
+
+    def do_copy_to_annotated() -> None:
+        copy_images(paths.selected_frames.resolve(), (paths.annotated / "images").resolve())
+
+    def do_build_dataset() -> None:
+        build_dataset(paths, float(val_var.get()), float(test_var.get()), 42)
+
+    def do_train() -> None:
+        train_yolo(paths, model_var.get().strip(), int(epochs_var.get()), int(imgsz_var.get()), int(batch_var.get()), None)
+
+    style = ttk.Style()
+    style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
+    style.configure("Step.TLabelframe.Label", font=("Segoe UI", 11, "bold"))
+
+    main_frame = ttk.Frame(root, padding=16)
+    main_frame.pack(fill="both", expand=True)
+
+    header = ttk.Frame(main_frame)
+    header.pack(fill="x", pady=(0, 12))
+    ttk.Label(header, text="Stage 1 Visual Pipeline", style="Title.TLabel").pack(side="left")
+    ttk.Label(header, textvariable=status_var).pack(side="right")
+
+    counts_var = tk.StringVar()
+    ttk.Label(main_frame, textvariable=counts_var, foreground="#444").pack(fill="x", pady=(0, 10))
+
+    body = ttk.PanedWindow(main_frame, orient="horizontal")
+    body.pack(fill="both", expand=True)
+
+    left = ttk.Frame(body, padding=(0, 0, 12, 0))
+    right = ttk.Frame(body)
+    body.add(left, weight=2)
+    body.add(right, weight=3)
+
+    video_box = ttk.LabelFrame(left, text="1. Video -> Frames", style="Step.TLabelframe")
+    video_box.pack(fill="x", pady=(0, 10))
+    ttk.Entry(video_box, textvariable=video_var).pack(fill="x", padx=10, pady=(10, 6))
+    row = ttk.Frame(video_box)
+    row.pack(fill="x", padx=10, pady=(0, 10))
+    ttk.Button(row, text="Choose Video", command=pick_video).pack(side="left")
+    ttk.Label(row, text="FPS").pack(side="left", padx=(12, 4))
+    ttk.Entry(row, width=6, textvariable=fps_var).pack(side="left")
+    ttk.Button(row, text="Extract Frames", command=lambda: run_background("Extract frames", do_extract)).pack(side="right")
+
+    review_box = ttk.LabelFrame(left, text="2. Review And Select", style="Step.TLabelframe")
+    review_box.pack(fill="x", pady=(0, 10))
+    ttk.Button(review_box, text="Generate Review Page", command=lambda: run_background("Generate review page", do_review)).pack(fill="x", padx=10, pady=(10, 6))
+    ttk.Button(review_box, text="Open Review Page", command=open_review).pack(fill="x", padx=10, pady=6)
+    ttk.Button(review_box, text="Open raw_frames Folder", command=lambda: open_path(paths.raw_frames)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(review_box, text="Open selected_frames Folder", command=lambda: open_path(paths.selected_frames)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(review_box, text="Copy All Raw Frames To selected_frames", command=lambda: run_background("Select all raw frames", do_select_all)).pack(fill="x", padx=10, pady=(6, 10))
+
+    annotate_box = ttk.LabelFrame(left, text="3. Annotation Prep", style="Step.TLabelframe")
+    annotate_box.pack(fill="x", pady=(0, 10))
+    ttk.Label(annotate_box, text="Classes, comma separated").pack(anchor="w", padx=10, pady=(10, 2))
+    ttk.Entry(annotate_box, textvariable=classes_var).pack(fill="x", padx=10, pady=(0, 6))
+    ttk.Button(annotate_box, text="Save classes.txt", command=save_classes).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="Copy selected_frames To annotated/images", command=lambda: run_background("Copy to annotated/images", do_copy_to_annotated)).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="Open annotated/images", command=lambda: open_path(paths.annotated / "images")).pack(fill="x", padx=10, pady=6)
+    ttk.Button(annotate_box, text="Open annotated/labels", command=lambda: open_path(paths.annotated / "labels")).pack(fill="x", padx=10, pady=(6, 10))
+
+    dataset_box = ttk.LabelFrame(left, text="4. Build Dataset And Train", style="Step.TLabelframe")
+    dataset_box.pack(fill="x")
+    ratio_row = ttk.Frame(dataset_box)
+    ratio_row.pack(fill="x", padx=10, pady=(10, 6))
+    ttk.Label(ratio_row, text="Val").pack(side="left")
+    ttk.Entry(ratio_row, width=6, textvariable=val_var).pack(side="left", padx=(4, 12))
+    ttk.Label(ratio_row, text="Test").pack(side="left")
+    ttk.Entry(ratio_row, width=6, textvariable=test_var).pack(side="left", padx=(4, 12))
+    ttk.Button(ratio_row, text="Build Dataset", command=lambda: run_background("Build dataset", do_build_dataset)).pack(side="right")
+
+    train_row_1 = ttk.Frame(dataset_box)
+    train_row_1.pack(fill="x", padx=10, pady=6)
+    ttk.Label(train_row_1, text="Model").pack(side="left")
+    ttk.Entry(train_row_1, width=14, textvariable=model_var).pack(side="left", padx=(4, 12))
+    ttk.Label(train_row_1, text="Epochs").pack(side="left")
+    ttk.Entry(train_row_1, width=6, textvariable=epochs_var).pack(side="left", padx=(4, 12))
+
+    train_row_2 = ttk.Frame(dataset_box)
+    train_row_2.pack(fill="x", padx=10, pady=(6, 10))
+    ttk.Label(train_row_2, text="imgsz").pack(side="left")
+    ttk.Entry(train_row_2, width=6, textvariable=imgsz_var).pack(side="left", padx=(4, 12))
+    ttk.Label(train_row_2, text="batch").pack(side="left")
+    ttk.Entry(train_row_2, width=6, textvariable=batch_var).pack(side="left", padx=(4, 12))
+    ttk.Button(train_row_2, text="Train YOLO", command=lambda: run_background("Train YOLO", do_train)).pack(side="right")
+
+    guide = ttk.LabelFrame(right, text="Workflow Notes", style="Step.TLabelframe")
+    guide.pack(fill="x", pady=(0, 10))
+    notes = (
+        "1. Choose the video in data/raw_videos, set FPS to 2 or 5, then Extract Frames.\n"
+        "2. Generate and open the review page. Copy useful frames into data/selected_frames.\n"
+        "3. Save class names. Copy selected frames into annotated/images.\n"
+        "4. Use LabelImg: Open Dir = annotated/images, Change Save Dir = annotated/labels, format = YOLO.\n"
+        "5. Build Dataset after every image has a matching .txt label.\n"
+        "6. Train only after dataset counts look correct."
+    )
+    ttk.Label(guide, text=notes, justify="left").pack(fill="x", padx=10, pady=10)
+
+    log_frame = ttk.LabelFrame(right, text="Log", style="Step.TLabelframe")
+    log_frame.pack(fill="both", expand=True)
+    log_box = tk.Text(log_frame, height=20, wrap="word")
+    scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=log_box.yview)
+    log_box.configure(yscrollcommand=scrollbar.set)
+    log_box.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+    scrollbar.pack(side="right", fill="y", padx=(0, 10), pady=10)
+
+    footer = ttk.Frame(main_frame)
+    footer.pack(fill="x", pady=(10, 0))
+    ttk.Button(footer, text="Refresh Counts", command=refresh_counts).pack(side="left")
+    ttk.Button(footer, text="Open Project Folder", command=lambda: open_path(paths.root)).pack(side="left", padx=8)
+    ttk.Button(footer, text="Open README", command=lambda: os.startfile(str(paths.root / "README_STAGE1.md"))).pack(side="left")
+    ttk.Button(footer, text="Exit", command=root.destroy).pack(side="right")
+
+    refresh_counts()
+    log("GUI ready.")
+    root.mainloop()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Game-screen YOLO dataset pipeline and realtime runtime.")
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Project root directory.")
@@ -1040,6 +1277,8 @@ def parse_args() -> argparse.Namespace:
 
     runtime_config = sub.add_parser("init-runtime-config", help="Create or overwrite runtime_config.json.")
     runtime_config.add_argument("--overwrite", action="store_true", help="Overwrite existing runtime_config.json.")
+
+    sub.add_parser("gui", help="Launch a local visual UI for the first-stage workflow.")
 
     extract = sub.add_parser("extract", help="Extract video frames with ffmpeg.")
     extract.add_argument("video", type=Path, help="Input video path.")
@@ -1104,6 +1343,8 @@ def main() -> None:
         init_project(paths, args.classes)
     elif args.command == "init-runtime-config":
         write_default_runtime_config(paths, overwrite=args.overwrite)
+    elif args.command == "gui":
+        launch_stage1_gui(paths)
     elif args.command == "extract":
         extract_frames(args.video.resolve(), (args.out or paths.raw_frames).resolve(), args.fps, args.prefix)
     elif args.command == "review":

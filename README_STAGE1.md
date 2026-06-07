@@ -13,6 +13,39 @@ pip install -r requirements.txt
 
 抽帧还需要本机安装 `ffmpeg` 并加入 PATH。
 
+
+## 可视化页面
+
+第一阶段不必只能用命令行。项目提供了本地 GUI 页面：
+
+```bash
+python main.py gui
+```
+
+页面功能：
+
+- 选择 `data/raw_videos/` 中的视频。
+- 设置抽帧 FPS，执行抽帧。
+- 生成并打开 `reports/frame_review.html`。
+- 打开 `raw_frames`、`selected_frames`、`annotated/images`、`annotated/labels` 目录。
+- 保存 `classes.txt` 类别名。
+- 把 `selected_frames` 复制到 `annotated/images`。
+- 构建 YOLO 数据集。
+- 启动 YOLO 训练。
+
+推荐使用顺序：
+
+```text
+Choose Video -> Extract Frames -> Generate Review Page -> Open Review Page
+-> 手工复制有价值图片到 selected_frames
+-> Copy selected_frames To annotated/images
+-> 用 LabelImg 标注
+-> Build Dataset
+-> Train YOLO
+```
+
+GUI 使用 Tkinter，属于 Python 标准库，不需要额外安装。
+
 ## 第一阶段：数据集与训练
 
 ### 目录约定
@@ -284,3 +317,4 @@ python main.py run models/game_yolo/weights/best.pt --target-class enemy --stabl
 - 训练前先保证 `data/annotated/images` 和 `data/annotated/labels` 中的文件能一一对应。
 - 第二阶段不要一开始就关闭 `--dry-run`，先确认识别框、类别名、目标中心、UI 区域和触发节奏都正确。
 - 固定 UI 规则要从最稳定的目标开始加，例如死亡提示、加载黑屏、菜单按钮，不要一开始配置太多规则。
+
